@@ -60,7 +60,8 @@ def main(argv: list[str] | None = None) -> None:
     p = commands.add_parser("evaluate", help="人手正解に対して評価する")
     p.add_argument("--reference-csv", type=Path, required=True)
     source = p.add_mutually_exclusive_group(required=True)
-    source.add_argument("--llm-responses", type=Path, help="1つのモデル・条件のresponsesディレクトリ")
+    source.add_argument("--llm-responses", type=Path, nargs="+",
+                        help="1つのモデル・条件のresponsesディレクトリ（分けて推論した場合は複数）")
     source.add_argument("--rule-predictions", type=Path, help="ルールベース手法の予測JSON")
     p.add_argument("--output", type=Path, required=True)
 
@@ -85,7 +86,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "evaluate":
         reference = evaluation.read_reference(args.reference_csv)
         if args.llm_responses:
-            predictions = evaluation.llm_predictions(args.llm_responses)
+            predictions = evaluation.llm_predictions(*args.llm_responses)
         else:
             predictions = evaluation.rule_predictions(args.rule_predictions)
         result = {**evaluation.metrics(reference, predictions),

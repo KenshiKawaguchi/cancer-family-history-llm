@@ -3,7 +3,9 @@
 
 評価対象のテキストを含む患者を復元抽出し、抽出された患者のテキストをすべて用いて指標を再計算して、
 パーセンタイル法で区間を定める。2条件の差は、同じ再標本で両方の条件を計算して求める。
-誤りまたは正解が0件で区間の幅が0となる指標は、該当する患者数を件数とみなしたクロッパー・ピアソン法で求める。
+誤りまたは正解が0件で区間の幅が0となる指標は、指標自体の区間は求めず、患者単位の割合について
+クロッパー・ピアソン法で求めた区間を参考として出力する（論文では表の脚注に示した）。
+条件間の差は、事前に計画した比較とルールベース手法の比較について、すべての指標で求める。
 """
 
 import argparse
@@ -23,19 +25,16 @@ MODELS = {"qwen3.5-27b-q4_k_m": "Qwen3.5", "gemma-3-27b-it-q4_k_m": "Gemma 3",
 CONDITIONS = {"zero_shot": "ZS", "few_shot": "FS", "zero_shot_cot": "ZS+C", "few_shot_cot": "FS+C"}
 FIELDS = ["n", "exact", "pres", "tp", "fp", "fn", "npos", "posexact", "ptp", "pfp", "pfn", "pred_pos"]
 
-# 本文で比較した条件の組（前者 - 後者）と指標。
-COMPARISONS = (
-    [((m, "FS"), (m, "ZS"), "presence_accuracy") for m in MODELS.values()]
-    + [((m, "FS+C"), (m, "FS"), "presence_accuracy") for m in MODELS.values()]
-    + [((m, "FS+C"), (m, "FS"), "pair_f1") for m in ("MedGemma", "LLM-jp", "SIP-jmed")]
-    + [(("SIP-jmed", "ZS+C"), ("SIP-jmed", "ZS"), m) for m in ("presence_accuracy", "pair_recall")]
-    + [(("MedGemma", c), ("Gemma 3", c), "presence_accuracy") for c in CONDITIONS.values()]
-    + [(("MedGemma", "FS"), ("Gemma 3", "FS"), m) for m in ("pair_recall", "pair_f1", "positive_pairset_accuracy")]
-    + [(("LLM-jp", "FS"), ("SIP-jmed", "FS"), m) for m in ("presence_accuracy", "pair_f1")]
-    + [(("LLM-jp", "ZS+C"), ("SIP-jmed", "ZS+C"), "presence_accuracy")]
-    + [(("rule", "qwen"), ("rule", "simple"), m)
-       for m in ("presence_f1", "pair_precision", "pair_recall", "pair_f1", "positive_pairset_accuracy")]
-    + [(("Qwen3.5", "FS"), ("rule", "qwen"), m) for m in ("pair_recall", "pair_f1", "positive_pairset_accuracy")]
+# 条件の組（前者 - 後者）。事前に計画した比較と、ルールベース手法の比較。
+PAIRS = (
+    [((m, "FS"), (m, "ZS")) for m in MODELS.values()]
+    + [((m, "FS+C"), (m, "ZS+C")) for m in MODELS.values()]
+    + [((m, "FS+C"), (m, "FS")) for m in MODELS.values()]
+    + [((m, "ZS+C"), (m, "ZS")) for m in MODELS.values()]
+    + [((first, c), (second, c)) for first, second in (("MedGemma", "Gemma 3"), ("LLM-jp", "SIP-jmed"),
+                                                        ("Qwen3.5", "Gemma 3")) for c in CONDITIONS.values()]
+    + [(("rule", "qwen"), ("rule", "simple")), (("Qwen3.5", "FS"), ("rule", "qwen")),
+       (("Qwen3.5", "FS"), ("rule", "simple"))]
 )
 
 
@@ -86,28 +85,34 @@ def interval(point, boot, totals, metric):
     if np.ptp(samples) > 0:
         low, high = np.percentile(samples, [2.5, 97.5])
         return value, float(low), float(high), "bootstrap"
-    if metric == "pair_precision" and value == 1.0:
-        n = int(((totals["tp"] + totals["fp"]) > 0).sum())
-        return (value, *clopper_pearson(n, n), f"clopper_pearson_patients={n}")
-    if metric == "presence_precision" and value == 1.0:
-        n = int((totals["pred_pos"] > 0).sum())
-        return (value, *clopper_pearson(n, n), f"clopper_pearson_patients={n}")
-    if metric in ("pair_recall", "presence_recall", "positive_pairset_accuracy") and value == 0.0:
-        n = int((totals["npos"] > 0).sum())
-        return (value, *clopper_pearson(0, n), f"clopper_pearson_patients={n}")
-    return value, None, None, "not_calculated"
+    # 幅0の区間：患者単位の割合のクロッパー・ピアソン区間を参考として返す。
+    if value not in (0.0, 1.0):
+        return value, None, None, "not_calculated"
+    if metric in ("presence_accuracy", "pairset_accuracy"):
+        n = int((totals["n"] > 0).sum())               # すべてのテキストで正解（または不正解）であった患者
+    elif metric == "pair_precision":
+        n = int(((totals["tp"] + totals["fp"]) > 0).sum())  # ペアを出力した患者
+    elif metric == "presence_precision":
+        n = int((totals["pred_pos"] > 0).sum())        # 家族歴ありと出力した患者
+    elif metric in ("pair_recall", "presence_recall", "positive_pairset_accuracy"):
+        n = int((totals["npos"] > 0).sum())            # 家族歴のある患者
+    else:
+        return value, None, None, "not_calculated"     # F1値は区間を求めない
+    successes = n if value == 1.0 else 0
+    return (value, *clopper_pearson(successes, n), f"clopper_pearson_patients={successes}/{n}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference-csv", type=Path, required=True, help="人手正解CSV")
-    parser.add_argument("--llm-results", type=Path, required=True,
-                        help="<モデルID>/<条件>/responses を含むLLMの出力ディレクトリ")
+    parser.add_argument("--llm-results", type=Path, nargs="+", required=True,
+                        help="<モデルID>/<条件>/responses を含むLLMの出力ディレクトリ。分けて推論した出力は"
+                             "同じモデル・条件としてまとめる。最終の出力だけを含むディレクトリを指定する")
     parser.add_argument("--simple-rule-predictions", type=Path, required=True)
     parser.add_argument("--qwen-rule-predictions", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--n-boot", type=int, default=2000)
-    parser.add_argument("--seed", type=int, default=20261026)
+    parser.add_argument("--seed", type=int, default=20261027)
     args = parser.parse_args()
     if args.output.exists():
         raise SystemExit(f"既存の出力を上書きしません: {args.output}")
@@ -115,11 +120,13 @@ def main():
     reference = evaluation.read_reference(args.reference_csv)
     patients = sorted({patient_id for patient_id, _ in reference})
     patient_index = {patient_id: i for i, patient_id in enumerate(patients)}
-    systems = {}
-    for responses in sorted(args.llm_results.glob("**/responses")):
-        model, condition = responses.parts[-3], responses.parts[-2]
-        if model in MODELS and condition in CONDITIONS:
-            systems[(MODELS[model], CONDITIONS[condition])] = evaluation.llm_predictions(responses)
+    response_dirs = {}
+    for root in args.llm_results:
+        for responses in sorted(root.glob("**/responses")):
+            model, condition = responses.parts[-3], responses.parts[-2]
+            if model in MODELS and condition in CONDITIONS:
+                response_dirs.setdefault((MODELS[model], CONDITIONS[condition]), []).append(responses)
+    systems = {key: evaluation.llm_predictions(*dirs) for key, dirs in sorted(response_dirs.items())}
     systems[("rule", "simple")] = evaluation.rule_predictions(args.simple_rule_predictions)
     systems[("rule", "qwen")] = evaluation.rule_predictions(args.qwen_rule_predictions)
 
@@ -132,13 +139,14 @@ def main():
     boot = {key: metrics({k: weights @ a for k, a in t.items()}) for key, t in totals.items()}
 
     differences = []
-    for first, second, metric in COMPARISONS:
-        samples = boot[first][metric] - boot[second][metric]
-        samples = samples[~np.isnan(samples)]
-        low, high = np.percentile(samples, [2.5, 97.5])
-        differences.append({"first": list(first), "second": list(second), "metric": metric,
-                            "difference": point[first][metric] - point[second][metric],
-                            "low": float(low), "high": float(high)})
+    for first, second in PAIRS:
+        for metric in point[first]:
+            samples = boot[first][metric] - boot[second][metric]
+            samples = samples[~np.isnan(samples)]
+            low, high = np.percentile(samples, [2.5, 97.5])
+            differences.append({"first": list(first), "second": list(second), "metric": metric,
+                                "difference": point[first][metric] - point[second][metric],
+                                "low": float(low), "high": float(high)})
     result = {"n_boot": args.n_boot, "seed": args.seed, "patients": len(patients), "texts": len(reference),
               "estimates": {f"{k[0]}|{k[1]}": {m: interval(point[k], boot[k], totals[k], m) for m in point[k]}
                             for k in totals},

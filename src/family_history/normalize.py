@@ -1,4 +1,9 @@
-"""出力の検証と、続柄・がん種の正規化。"""
+"""出力の形式の確認と、続柄・がん種の正規化（辞書v2）。
+
+出力は形式だけを確認する（JSONとして解析でき、Schemaに適合し、続柄と疾患名が空でないこと）。
+人物や文脈の判断に基づいて採用項目を除いたり訂正したりはしない。
+辞書v2は、評価対象と重ならないルール生成用の200患者で見つかった表記ゆれの型から一般化した。
+"""
 
 from __future__ import annotations
 
@@ -24,49 +29,45 @@ NON_BLOOD_MARKERS = (
 )
 
 
-RELATIONSHIP_PATTERNS = {
-    "祖父": r"母方祖父|父方祖父|祖父",
-    "祖母": r"母方祖母|父方祖母|祖母",
-    "伯父": r"伯父",
-    "叔父": r"叔父|おじ",
-    "伯母": r"伯母",
-    "叔母": r"叔母|おば",
-    "父": r"父親|実父|(?<!義)父(?!方)",
-    "母": r"母親|実母|(?<!義)母(?!方)",
-    "兄": r"実兄|長兄|(?<!義)兄",
-    "弟": r"実弟|(?<!義)弟",
-    "姉": r"実姉|長姉|(?<!義)姉",
-    "妹": r"実妹|(?<!義)妹",
-    "子": r"実子|子供|子ども|子(?=が|は|の|に|、|：|:)",
-    "息子": r"長男|次男|三男|息子",
-    "娘": r"長女|次女|三女|娘",
-    "孫": r"孫",
-    "いとこ": r"いとこ|従兄弟|従姉妹|従兄妹|従兄|従弟|従姉|従妹",
-}
+# 臓器名と「癌」の間に、部位・病期・組織型を表す語が入ってもよい。
+# 「肛門」で始まる部位（直腸肛門部など）は大腸に含めない。
+CANCER_SUFFIX = r"(?:がん|癌|ガン|悪性腫瘍|Ca(?![a-z]))"
+CANCER_MODIFIER = (
+    r"(?:(?!肛門)[一-龥A-Za-z]{1,4}部"
+    r"|早期|進行|局所進行|再発|末期|表在|粘膜内|浸潤性|浸潤"
+    r"|腺|扁平上皮|小細胞|非小細胞|大細胞|印環細胞|粘液|乳頭|小葉|乳管|未分化"
+    r"|[低中高]分化型?腺?)"
+)
+
+
+def _organ_cancer(organs: str) -> str:
+    return rf"(?:{organs})(?:{CANCER_MODIFIER}){{0,3}}{CANCER_SUFFIX}"
 
 
 CANCER_PATTERNS = {
-    "口腔・咽頭がん": r"口腔(?:がん|癌)|咽頭(?:がん|癌)|口腔・咽頭(?:がん|癌)",
-    "食道がん": r"食道(?:がん|癌)",
-    "胃がん": r"胃(?:がん|癌)",
-    "大腸がん": r"(?:大腸|結腸|直腸|盲腸|S状結腸|横行結腸|上行結腸|下行結腸)(?:がん|癌)",
-    "肝臓がん": r"(?:肝臓|肝)(?:がん|癌)|肝細胞癌",
-    "胆道がん": r"(?:胆道|胆管|胆嚢|胆のう)(?:がん|癌)",
-    "膵臓がん": r"(?:膵臓|膵)(?:がん|癌)",
-    "喉頭がん": r"喉頭(?:がん|癌)",
-    "肺がん": r"肺(?:がん|癌)",
-    "皮膚がん": r"皮膚(?:がん|癌)|メラノーマ|悪性黒色腫",
-    "乳房がん": r"(?:乳房|乳)(?:がん|癌)",
-    "子宮がん": r"子宮(?:頸部|頸|体部|体)?(?:がん|癌)",
-    "卵巣がん": r"卵巣(?:がん|癌)",
-    "前立腺がん": r"前立腺(?:がん|癌)",
-    "膀胱がん": r"膀胱(?:がん|癌)",
-    "腎・尿路がん": r"(?:腎臓|腎|腎盂|尿管|上部尿路|腎・尿路)(?:がん|癌)",
-    "脳腫瘍": r"脳腫瘍|脳(?:がん|癌)",
-    "甲状腺がん": r"甲状腺(?:がん|癌)|甲状腺悪性",
-    "悪性リンパ腫": r"悪性リンパ腫|リンパ腫",
+    "口腔・咽頭がん": _organ_cancer(r"口腔・咽頭|口腔|咽頭"),
+    "食道がん": _organ_cancer(r"食道"),
+    "胃がん": _organ_cancer(r"胃"),
+    "大腸がん": _organ_cancer(
+        r"大腸|S状結腸|横行結腸|上行結腸|下行結腸|結腸|直腸|盲腸|回盲部"
+    ),
+    "肝臓がん": _organ_cancer(r"肝臓|肝") + r"|肝細胞癌|(?<![A-Za-z])HCC(?![A-Za-z])",
+    "胆道がん": _organ_cancer(r"胆道|胆管|胆嚢|胆のう"),
+    "膵臓がん": _organ_cancer(r"膵臓|膵"),
+    "喉頭がん": _organ_cancer(r"喉頭"),
+    "肺がん": _organ_cancer(r"肺"),
+    "皮膚がん": _organ_cancer(r"皮膚") + r"|メラノーマ|悪性黒色腫",
+    "乳房がん": _organ_cancer(r"乳房|乳(?!頭)"),
+    "子宮がん": _organ_cancer(r"子宮(?:頸部|頸|体部|体)?"),
+    "卵巣がん": _organ_cancer(r"卵巣"),
+    "前立腺がん": _organ_cancer(r"前立腺"),
+    "膀胱がん": _organ_cancer(r"膀胱"),
+    "腎・尿路がん": _organ_cancer(r"腎臓|腎盂|腎・尿路|腎|尿管|上部尿路"),
+    "脳腫瘍": r"脳腫瘍|" + _organ_cancer(r"脳"),
+    "甲状腺がん": _organ_cancer(r"甲状腺") + r"|甲状腺悪性",
+    "悪性リンパ腫": r"悪性リンパ腫|リンパ腫|(?<![A-Za-z])DLBCL(?![A-Za-z])",
     "多発性骨髄腫": r"多発性骨髄腫|骨髄腫",
-    "白血病": r"白血病",
+    "白血病": r"白血病|(?<![A-Za-z])(?:AML|ALL|CML|CLL)(?![A-Za-z])",
 }
 
 
@@ -106,13 +107,12 @@ STRUCTURED_ENTITY_KEYS = {
     "家族歴として採用",
 }
 
+# 正規化できない採用項目を、誤って抽出されたペアとして数えるための印。
+UNNORMALIZED = "正規化できない採用項目"
+
 
 class StructuredOutputError(ValueError):
     """出力がJSONとして解析できないか、Schemaに適合しない。"""
-
-
-class SemanticOutputError(ValueError):
-    """Schemaには適合するが、内容に不整合がある。"""
 
 
 def parse_strict_response(raw_response: str) -> dict[str, Any]:
@@ -152,63 +152,6 @@ def parse_strict_response(raw_response: str) -> dict[str, Any]:
         if type(entity["家族歴として採用"]) is not bool:
             raise StructuredOutputError(f"{prefix}.家族歴として採用はbooleanが必要です")
     return decoded
-
-
-def validate_semantic_response(response: dict[str, Any], source_text: str) -> None:
-    """内容の整合性を検証する。不整合があっても出力は修正しない。
-
-    非血縁者の続柄の扱い、採用した項目が血縁者の対象がんであること、
-    続柄とがん種を所定の名称へ正規化できること、その組み合わせが原文の同じ文に近接して
-    現れること、「家族歴あり」の値が採用した項目の有無と一致することを確かめる。
-    """
-
-    entities = response["人物情報"]
-    adopted_count = 0
-    for index, entity in enumerate(entities):
-        prefix = f"人物情報[{index}]"
-        relation = entity["続柄"].strip()
-        experiencer = entity["罹患者区分"]
-        disease = entity["疾患名"].strip()
-        is_target = entity["対象がん"]
-        include = entity["家族歴として採用"]
-
-        if any(marker in relation for marker in NON_BLOOD_MARKERS):
-            if experiencer != "非血縁者":
-                raise SemanticOutputError(
-                    f"{prefix}: 義理・配偶者側の続柄は非血縁者である必要があります"
-                )
-            if include:
-                raise SemanticOutputError(
-                    f"{prefix}: 非血縁者を家族歴として採用できません"
-                )
-
-        if not include:
-            continue
-        adopted_count += 1
-        if experiencer != "血縁者" or not is_target:
-            raise SemanticOutputError(
-                f"{prefix}: 採用=trueには血縁者かつ対象がん=trueが必要です"
-            )
-
-        normalized_relation = normalize_relationship(relation)
-        normalized_cancers = normalize_cancers(disease)
-        if not normalized_relation or not normalized_cancers:
-            raise SemanticOutputError(
-                f"{prefix}: 採用対象の続柄または対象がんを正規化できません"
-            )
-        if not any(
-            has_source_evidence(normalized_relation, cancer, source_text)
-            for cancer in normalized_cancers
-        ):
-            raise SemanticOutputError(
-                f"{prefix}: 血縁者の続柄とがんの組み合わせを原文で確認できません"
-            )
-
-    expected_family_history = adopted_count > 0
-    if response["家族歴あり"] is not expected_family_history:
-        raise SemanticOutputError(
-            "家族歴ありは、家族歴として採用=trueの人物情報の有無と一致する必要があります"
-        )
 
 
 def normalize_relationship(value: object) -> str:
@@ -251,6 +194,11 @@ def normalize_relationship(value: object) -> str:
         "従姉": "いとこ",
         "従妹": "いとこ",
     }
+    # 先頭の「母方（の）」「父方（の）」を外し、「父の兄」などを伯父・伯母・叔父・叔母に読み替える。
+    text = re.sub(r"^(?:母方|父方)の?(?=.)", "", text)
+    parent_sibling = re.fullmatch(r"(?:父|母)の(兄|姉|弟|妹)", text)
+    if parent_sibling:
+        text = {"兄": "伯父", "姉": "伯母", "弟": "叔父", "妹": "叔母"}[parent_sibling.group(1)]
     text = replacements.get(text, text)
     return text if text in BLOOD_RELATIONSHIPS else ""
 
@@ -277,47 +225,11 @@ def normalize_cancers(value: object) -> list[str]:
     return []
 
 
-def _segments(source_text: str) -> list[str]:
-    return [
-        segment.strip()
-        for segment in re.split(r"[\n\r。；;]+", source_text.replace("<NL>", "\n"))
-        if segment.strip()
-    ]
-
-
-def has_source_evidence(relationship: str, cancer: str, source_text: str) -> bool:
-    relationship_pattern = RELATIONSHIP_PATTERNS.get(relationship)
-    cancer_pattern = CANCER_PATTERNS.get(cancer)
-    if not relationship_pattern or not cancer_pattern:
-        return False
-    non_blood_pattern = re.compile(r"義|夫の|妻の|旦那の|だんなの|配偶者の|嫁の|婿の|姑|舅")
-    for segment in _segments(source_text):
-        relationship_matches = list(re.finditer(relationship_pattern, segment))
-        cancer_matches = list(re.finditer(cancer_pattern, segment))
-        if not relationship_matches or not cancer_matches:
-            continue
-        pairs = sorted(
-            (
-                abs(rel.start() - disease.start()),
-                rel,
-                disease,
-            )
-            for rel in relationship_matches
-            for disease in cancer_matches
-        )
-        for distance, rel_match, cancer_match in pairs:
-            if distance > 100:
-                continue
-            start = max(0, min(rel_match.start(), cancer_match.start()) - 6)
-            end = min(len(segment), max(rel_match.end(), cancer_match.end()) + 6)
-            if non_blood_pattern.search(segment[start:end]):
-                continue
-            return True
-    return False
-
-
 def family_history_pairs(document: dict[str, Any]) -> set[tuple[str, str]]:
-    """構造化出力から、家族歴として採用された血縁者の続柄とがん種のペアを取り出す。"""
+    """構造化された記録から、家族歴として採用された血縁者の続柄とがん種のペアを取り出す。
+
+    人手正解と単純ルールの出力に用いる。
+    """
 
     pairs: set[tuple[str, str]] = set()
     for entity in document.get("人物情報", []):
@@ -332,11 +244,23 @@ def family_history_pairs(document: dict[str, Any]) -> set[tuple[str, str]]:
     return pairs
 
 
-def strict_pairs(document: dict[str, Any]) -> list[list[str]]:
-    """Schemaに適合する出力からペアを取り出し、「家族歴あり」の値との一致も確かめる。"""
+def adopted_pairs(document: dict[str, Any]) -> set[tuple[str, str]]:
+    """LLMの出力から、「家族歴として採用」がtrueの項目をすべてペアとして取り出す。
 
-    parsed = parse_strict_response(json.dumps(document, ensure_ascii=False))
-    pairs = [list(pair) for pair in sorted(family_history_pairs(parsed))]
-    if parsed["家族歴あり"] != bool(pairs):
-        raise ValueError("家族歴ありの値と採用したペアが一致しません")
+    罹患者区分や「対象がん」の値にかかわらず、採用された項目はすべて含める。
+    続柄または疾患名を正規化できない採用項目も除かず、正解と一致しないペアとして残す。
+    """
+
+    pairs: set[tuple[str, str]] = set()
+    for index, entity in enumerate(document.get("人物情報", [])):
+        if entity.get("家族歴として採用") is not True:
+            continue
+        relation = str(entity.get("続柄", "")).strip()
+        disease = str(entity.get("疾患名", "")).strip()
+        relationship = normalize_relationship(relation)
+        cancers = normalize_cancers(disease)
+        if relationship and cancers:
+            pairs.update((relationship, cancer) for cancer in cancers)
+        else:
+            pairs.add((UNNORMALIZED, f"{index}:{relation}:{disease}"))
     return pairs

@@ -17,7 +17,9 @@ from typing import Any, Callable
 from .constants import BLOOD_RELATIONSHIPS, CANCER_TYPES
 from .inference import GENERATION_CONFIG, ModelSettings, extract_content, load_model, usage_of
 from .io_utils import candidate_records, json_sha256, load_json, load_patient_ids, write_json
-from .normalize import CANCER_ALIASES, CANCER_PATTERNS, RELATIONSHIP_PATTERNS, strict_pairs
+# ルール生成は、ルールを作成した時点の辞書（v1）とその検証で行った。
+from .normalize_v1 import (CANCER_ALIASES, CANCER_PATTERNS, RELATIONSHIP_PATTERNS, SemanticOutputError,
+                           StructuredOutputError, parse_strict_response, strict_pairs, validate_semantic_response)
 from .rule_engine import predict, prepare_rule_input, rule_schema, validate_rules
 
 
@@ -35,7 +37,10 @@ SLOTS = {"$relation": r"\g<relation>", "$disease": r"\g<disease>"}
 
 def development_records(candidate_dir: Path, patient_ids: set[str],
                         response_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Qwen3.5のFSの抽出結果を疑似正解とする。検証に失敗した出力と、入力を切り捨てた出力は除く。"""
+    """Qwen3.5のFSの抽出結果を疑似正解とする。検証に失敗した出力と、入力を切り捨てた出力は除く。
+
+    検証は辞書v1による内容の検証（normalize_v1.validate_semantic_response）で行う。
+    """
 
     records, excluded = [], []
     responses: dict[str, dict[str, Any]] = {}
@@ -46,7 +51,7 @@ def development_records(candidate_dir: Path, patient_ids: set[str],
             responses[patient_id] = load_json(path) if path.is_file() else {}
         item = responses[patient_id].get(record["date"])
         try:
-            if not isinstance(item, dict) or item.get("status") != "success":
+            if not isinstance(item, dict) or item.get("status") not in ("success", "semantic_invalid"):
                 raise ValueError("出力がないか、出力の検証に失敗しています")
             meta = item.get("_meta", {})
             if meta.get("model_id") != MODEL_ID or meta.get("condition") != "few_shot":
@@ -55,7 +60,13 @@ def development_records(candidate_dir: Path, patient_ids: set[str],
                 raise ValueError("入力が切り捨てられています")
             if meta.get("source_sha256") != record["source_sha256"]:
                 raise ValueError("出力と候補テキストの原文が一致しません")
-            records.append({**record, "label_pairs": strict_pairs(item["prediction"])})
+            prediction = (parse_strict_response(item["raw_response"]) if "raw_response" in item
+                          else item["prediction"])
+            try:
+                validate_semantic_response(prediction, record["source_text"].strip())
+            except (StructuredOutputError, SemanticOutputError) as exc:
+                raise ValueError("出力がないか、出力の検証に失敗しています") from exc
+            records.append({**record, "label_pairs": strict_pairs(prediction)})
         except (ValueError, KeyError, TypeError) as exc:
             excluded.append({**record, "reason": str(exc)})
     return records, excluded

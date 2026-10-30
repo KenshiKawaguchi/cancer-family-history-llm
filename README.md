@@ -13,11 +13,12 @@ No patient data, model weights, or experimental outputs are included. The clinic
 | `src/family_history/selection.py` | Selection of evaluation and rule-generation patients |
 | `src/family_history/prompts.py` | Prompts |
 | `src/family_history/inference.py` | Extraction with LLMs |
-| `src/family_history/normalize.py` | Output validation and normalization |
+| `src/family_history/normalize.py` | Output format check and normalization (dictionary v2, used for scoring and the simple rules) |
+| `src/family_history/normalize_v1.py` | Output validation and normalization used when the Qwen3.5-generated rules were created (dictionary v1) |
 | `src/family_history/simple_rules.py` | Simple rules |
 | `src/family_history/rule_generation.py` | Rule generation by Qwen3.5 |
 | `src/family_history/rule_engine.py` | Rule validation and application |
-| `src/family_history/evaluation.py` | Evaluation |
+| `src/family_history/evaluation.py` | Evaluation (outputs are checked only for format; adopted items are scored as output, and unnormalizable adopted items count as incorrect pairs) |
 | `scripts/compute_bootstrap_ci.py` | 95% CIs |
 | `scripts/summarize_age_sex.py` | Sex and age of the evaluated patients |
 
@@ -39,7 +40,7 @@ PYTHONPATH=src python -m family_history prepare-rule-generation # pseudo-labels 
 PYTHONPATH=src python -m family_history generate-rules          # rule generation and one regeneration
 PYTHONPATH=src python -m family_history apply-rules             # application of the generated rules
 PYTHONPATH=src python -m family_history evaluate                # evaluation against the reference standard
-python scripts/compute_bootstrap_ci.py                          # 95% CIs
+python scripts/compute_bootstrap_ci.py                          # 95% CIs (seed 20261027; pass only the final outputs)
 ```
 
 The context length of `infer` (`--n-ctx`) was 4096 for LLM-jp and 8192 for the other models.

@@ -2,8 +2,10 @@
 
 判定不能のテキストを除いて、家族歴有無の正解率・適合率・再現率・F1値、ペア集合の正解率、
 ペア単位の適合率・再現率・F1値、家族歴ありのテキストに限ったペア集合の正解率を求める。
-出力の検証に失敗した出力（JSON出力誤り）やルールの適用エラーは、ペアを抽出しなかった出力として数え、
-正解率ではすべて不正解とする。
+LLMの出力は形式だけを確認し、JSONとして解析できないかSchemaに適合しない出力（出力形式エラー）と
+ルールの適用エラーは、ペアを抽出しなかった出力として数え、正解率ではすべて不正解とする。
+それ以外の出力は、「家族歴として採用」がtrueの項目をそのまま採点し、正規化できない採用項目は
+誤って抽出されたペアとして数える。
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .io_utils import load_json
-from .normalize import family_history_pairs
+from .normalize import adopted_pairs, family_history_pairs, parse_strict_response
 
 Key = tuple[str, str]
 
@@ -33,20 +35,29 @@ def read_reference(path: Path) -> dict[Key, set[tuple[str, str]]]:
     return reference
 
 
-def llm_predictions(response_dir: Path) -> dict[Key, dict[str, Any]]:
-    """1つのモデル・プロンプト条件の出力を読む。"""
+def llm_predictions(*response_dirs: Path) -> dict[Key, dict[str, Any]]:
+    """1つのモデル・プロンプト条件の出力を読む。複数のディレクトリに分けて推論した場合はまとめて読む。"""
 
     predictions = {}
-    for path in sorted(response_dir.glob("*_withResponse.json")):
-        patient_id = path.name[: -len("_withResponse.json")]
-        for date, item in load_json(path).items():
-            success = item["status"] == "success"
-            predictions[(patient_id, date)] = {
-                "success": success,
-                "pairs": family_history_pairs(item["prediction"]) if success else set(),
-                "latency_sec": item["_meta"]["latency_sec"],
-                "source_truncated": item["_meta"]["source_truncated"],
-            }
+    for response_dir in response_dirs:
+        for path in sorted(Path(response_dir).glob("*_withResponse.json")):
+            patient_id = path.name[: -len("_withResponse.json")]
+            for date, item in load_json(path).items():
+                key = (patient_id, date)
+                if key in predictions:
+                    raise ValueError(f"同じテキストの出力が重複しています: {key}")
+                success = item["status"] != "json_invalid"
+                pairs: set[tuple[str, str]] = set()
+                if success:
+                    document = (parse_strict_response(item["raw_response"]) if "raw_response" in item
+                                else item["prediction"])
+                    pairs = adopted_pairs(document)
+                predictions[key] = {
+                    "success": success,
+                    "pairs": pairs,
+                    "latency_sec": item["_meta"]["latency_sec"],
+                    "source_truncated": item["_meta"]["source_truncated"],
+                }
     return predictions
 
 

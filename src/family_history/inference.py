@@ -12,12 +12,7 @@ from typing import Any
 
 from .constants import CONDITIONS
 from .io_utils import load_patient_ids, read_candidates, write_json
-from .normalize import (
-    SemanticOutputError,
-    StructuredOutputError,
-    parse_strict_response,
-    validate_semantic_response,
-)
+from .normalize import StructuredOutputError, parse_strict_response
 from .prompts import (
     OUTPUT_SCHEMA,
     PROMPT_VERSION,
@@ -150,12 +145,13 @@ def usage_of(completion: dict[str, Any]) -> dict[str, int]:
 
 
 def _chat_completion(model: Any, messages: list[dict[str, str]], *, max_tokens: int,
-                     structured: bool) -> tuple[str, dict[str, int]]:
+                     structured: bool) -> tuple[str, dict[str, int], str | None]:
     options: dict[str, Any] = {"messages": messages, "max_tokens": max_tokens, **GENERATION_CONFIG}
     if structured:
         options["response_format"] = {"type": "json_object", "schema": OUTPUT_SCHEMA}
     completion = model.create_chat_completion(**options)
-    return extract_content(completion), usage_of(completion)
+    finish_reason = (completion.get("choices") or [{}])[0].get("finish_reason")
+    return extract_content(completion), usage_of(completion), finish_reason
 
 
 def truncate_text(model: Any, text: str, token_budget: int) -> tuple[str, bool]:
@@ -168,20 +164,26 @@ def truncate_text(model: Any, text: str, token_budget: int) -> tuple[str, bool]:
     return truncated + "\n（入力上限により以下省略）", True
 
 
-def run_condition(model: Any, text: str, condition: str) -> tuple[str, dict[str, int]]:
-    """1件のテキストを1つのプロンプト条件で処理する。CoT条件では分析段階を先に行う。"""
+def run_condition(model: Any, text: str, condition: str) -> tuple[str, dict[str, int], dict[str, Any]]:
+    """1件のテキストを1つのプロンプト条件で処理する。CoT条件では分析段階を先に行い、分析メモも返す。"""
 
     usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    stages: dict[str, Any] = {}
     reasoning_note: str | None = None
+    reasoning_truncated = False
     if condition in {"zero_shot_cot", "few_shot_cot"}:
-        reasoning_note, usage = _chat_completion(model, build_reasoning_messages(text, condition),
-                                                 max_tokens=REASONING_MAX_TOKENS, structured=False)
+        reasoning_note, usage, finish = _chat_completion(model, build_reasoning_messages(text, condition),
+                                                         max_tokens=REASONING_MAX_TOKENS, structured=False)
         usage_total = {key: usage_total[key] + usage[key] for key in usage_total}
-    raw_response, usage = _chat_completion(
-        model, build_extraction_messages(text, condition, reasoning_note=reasoning_note),
+        stages["analysis"] = {"usage": usage, "finish_reason": finish, "analysis_memo": reasoning_note}
+        reasoning_truncated = finish == "length"
+    raw_response, usage, finish = _chat_completion(
+        model, build_extraction_messages(text, condition, reasoning_note=reasoning_note,
+                                         reasoning_truncated=reasoning_truncated),
         max_tokens=MAX_TOKENS, structured=True)
     usage_total = {key: usage_total[key] + usage[key] for key in usage_total}
-    return raw_response, usage_total
+    stages["structured_output"] = {"usage": usage, "finish_reason": finish}
+    return raw_response, usage_total, stages
 
 
 def run_inference(candidate_dir: Path, patient_list: Path, output_root: Path, settings: ModelSettings,
@@ -189,7 +191,8 @@ def run_inference(candidate_dir: Path, patient_list: Path, output_root: Path, se
     """選択した患者の候補テキストを、指定したプロンプト条件ですべて処理する。
 
     出力は「<output_root>/<model_id>/<条件>/responses/<患者ID>_withResponse.json」に、
-    日付ごとの状態（success、json_invalid、semantic_invalid）、出力、所要時間を保存する。
+    日付ごとの状態（success、json_invalid）、出力、所要時間を保存する。出力は形式だけを確認し、
+    JSONとして解析できないかSchemaに適合しない出力をjson_invalidとする。内容は検証せず、出力も書き換えない。
     """
 
     unknown = set(conditions) - set(CONDITIONS)
@@ -215,7 +218,7 @@ def run_inference(candidate_dir: Path, patient_list: Path, output_root: Path, se
                 inference_text, truncated = truncate_text(model, source_text, token_budget)
                 for condition in conditions:
                     generation_started = time.monotonic()
-                    raw_response, usage = run_condition(model, inference_text, condition)
+                    raw_response, usage, stages = run_condition(model, inference_text, condition)
                     meta = {
                         "model_id": settings.model_id, "condition": condition, "timestamp_utc": _timestamp(),
                         "latency_sec": round(time.monotonic() - generation_started, 3),
@@ -224,7 +227,7 @@ def run_inference(candidate_dir: Path, patient_list: Path, output_root: Path, se
                         "prompt_version": PROMPT_VERSION, "prompt_sha256": prompt_sha256(),
                         "structured_output_schema_version": SCHEMA_VERSION,
                         "structured_output_schema_sha256": schema_sha256(),
-                        "generation_config": generation_config, "usage": usage,
+                        "generation_config": generation_config, "usage": usage, "stages": stages,
                     }
                     try:
                         prediction = parse_strict_response(raw_response)
@@ -232,14 +235,8 @@ def run_inference(candidate_dir: Path, patient_list: Path, output_root: Path, se
                         outputs[condition][date] = {"status": "json_invalid", "raw_response": raw_response,
                                                     "parse_error": str(exc), "_meta": meta}
                         continue
-                    try:
-                        validate_semantic_response(prediction, inference_text)
-                    except SemanticOutputError as exc:
-                        outputs[condition][date] = {"status": "semantic_invalid", "raw_response": raw_response,
-                                                    "prediction": prediction, "semantic_error": str(exc),
-                                                    "_meta": meta}
-                        continue
-                    outputs[condition][date] = {"status": "success", "prediction": prediction, "_meta": meta}
+                    outputs[condition][date] = {"status": "success", "raw_response": raw_response, "prediction": prediction,
+                                                "_meta": meta}
             for condition in conditions:
                 write_json(model_root / condition / "responses" / f"{patient_id}_withResponse.json",
                            outputs[condition])

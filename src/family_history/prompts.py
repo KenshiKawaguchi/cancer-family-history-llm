@@ -14,7 +14,7 @@ from .constants import (
 
 
 # 出力に記録するプロンプトとSchemaの版。
-PROMPT_VERSION = "2026-09-01-v2"
+PROMPT_VERSION = "2026-10-27-v4"
 SCHEMA_VERSION = "2026-09-01-v2"
 
 
@@ -67,7 +67,7 @@ FEW_SHOT_EXAMPLES = (
                 }
             ],
         },
-        "主体は患者の実母で血縁者。子宮がんの家族歴として採用。",
+        "人物：母親｜区分：血縁者｜続柄：母｜疾患：子宮がん｜対象がん：該当｜否定・疑い：なし｜採用：する",
     ),
     (
         "【家族歴】兄が肺がん、父が肝癌。",
@@ -90,7 +90,7 @@ FEW_SHOT_EXAMPLES = (
                 },
             ],
         },
-        "兄と父はいずれも血縁者。肺がんと肝癌を各主体へ対応付け、原文表記のまま採用。",
+        "人物：兄｜区分：血縁者｜続柄：兄｜疾患：肺がん｜対象がん：該当｜否定・疑い：なし｜採用：する\n人物：父｜区分：血縁者｜続柄：父｜疾患：肝癌｜対象がん：該当｜否定・疑い：なし｜採用：する",
     ),
     (
         "本人は乳癌で治療中。父が大腸がんで死亡、母は食道がん、胃がんの病歴あり。",
@@ -127,12 +127,12 @@ FEW_SHOT_EXAMPLES = (
                 },
             ],
         },
-        "本人の乳癌は人物情報に残すが不採用。父と母の対象がんだけを家族歴として採用。",
+        "人物：本人｜区分：患者本人｜続柄：本人｜疾患：乳癌｜対象がん：該当｜否定・疑い：なし｜採用：しない\n人物：父｜区分：血縁者｜続柄：父｜疾患：大腸がん｜対象がん：該当｜否定・疑い：なし｜採用：する\n人物：母｜区分：血縁者｜続柄：母｜疾患：食道がん｜対象がん：該当｜否定・疑い：なし｜採用：する\n人物：母｜区分：血縁者｜続柄：母｜疾患：胃がん｜対象がん：該当｜否定・疑い：なし｜採用：する",
     ),
     (
         "症状悪化時は家族に電話するよう説明した。",
         {"家族歴あり": False, "人物情報": []},
-        "家族への連絡に関する記載であり、疾患の罹患情報ではないため人物情報は空。",
+        "疾患の記載なし",
     ),
     (
         "だんなの母は肺がんで他界した。",
@@ -148,7 +148,7 @@ FEW_SHOT_EXAMPLES = (
                 }
             ],
         },
-        "配偶者側の母なので非血縁者。人物情報には残すが家族歴には不採用。",
+        "人物：だんなの母｜区分：非血縁者｜続柄：義母｜疾患：肺がん｜対象がん：該当｜否定・疑い：なし｜採用：しない",
     ),
     (
         "父がBasedow病で手術をした。胃癌の既往はない。",
@@ -171,7 +171,7 @@ FEW_SHOT_EXAMPLES = (
                 },
             ],
         },
-        "Basedow病は対象がんではなく、胃癌は否定記載なので、どちらも家族歴には不採用。",
+        "人物：父｜区分：血縁者｜続柄：父｜疾患：Basedow病｜対象がん：非該当｜否定・疑い：なし｜採用：しない\n人物：父｜区分：血縁者｜続柄：父｜疾患：胃癌｜対象がん：該当｜否定・疑い：否定｜採用：しない",
     ),
     (
         "父か義父のどちらかが胃がんだったというが、どちらかは不明。",
@@ -187,12 +187,21 @@ FEW_SHOT_EXAMPLES = (
                 }
             ],
         },
-        "罹患者が血縁者の父か非血縁者の義父かを特定できず、採用可否が変わる。特定人物へ推測で割り当てず、不明として不採用。",
+        "人物：父か義父（特定できない）｜区分：不明｜続柄：不明｜疾患：胃がん｜対象がん：該当｜否定・疑い：なし｜採用：しない",
     ),
 )
 
 
-def _base_system_prompt() -> str:
+# CoT条件の分析メモの1行の形式（2026-10-27-v4）
+ANALYSIS_MEMO_FORMAT = (
+    "人物：<原文の表記>｜区分：<患者本人／血縁者／非血縁者／不明>｜続柄：<続柄>｜疾患：<原文の疾患名>"
+    "｜対象がん：<該当／非該当>｜否定・疑い：<なし／否定／疑い>｜採用：<する／しない>"
+)
+
+
+def _common_definitions() -> str:
+    """両段階に共通する定義。"""
+
     relationships = "、".join(BLOOD_RELATIONSHIPS)
     cancers = "、".join(CANCER_TYPES)
     return (
@@ -206,7 +215,15 @@ def _base_system_prompt() -> str:
         "本人、非血縁者、不明、対象外疾患、否定、疑いも人物情報に残しますが、採用はfalseです。\n"
         "人物と疾患の対応が採否に影響するほど曖昧なら推測せず、続柄・罹患者区分を『不明』、採用falseとして残してください。\n"
         "家族歴ありは、家族歴として採用がtrueの人物情報が1件以上あればtrue、それ以外はfalseにしてください。\n"
-        "同じ人物に複数疾患がある場合は疾患ごとに人物情報を分け、人物と疾患の対応を維持してください。\n"
+        "同じ人物に複数疾患がある場合は疾患ごとに人物情報を分け、人物と疾患の対応を維持してください。"
+    )
+
+
+def _base_system_prompt() -> str:
+    """構造化出力段階のsystem prompt。共通定義に出力形式の指示を続ける。"""
+
+    return (
+        f"{_common_definitions()}\n"
         "JSONのみを返してください。\n"
         "疾患の罹患情報がなければ {\"家族歴あり\": false, \"人物情報\": []} を返してください。"
     )
@@ -224,12 +241,14 @@ def build_extraction_messages(
     condition: str,
     *,
     reasoning_note: str | None = None,
+    reasoning_truncated: bool = False,
 ) -> list[dict[str, str]]:
     """構造化出力段階のメッセージを作る。FSとFS+Cではfew-shot例を、CoT条件では分析メモを加える。"""
 
     condition = validate_condition(condition)
     messages: list[dict[str, str]] = [{"role": "system", "content": _base_system_prompt()}]
     if condition in {"few_shot", "few_shot_cot"}:
+        # 例の入力は原文だけとする（FS+Cで分析メモを加えると、長い原文で入力がコンテキスト長を超えるため）
         for example_text, example_output, _ in FEW_SHOT_EXAMPLES:
             messages.append({"role": "user", "content": example_text})
             messages.append(
@@ -238,33 +257,49 @@ def build_extraction_messages(
                     "content": json.dumps(example_output, ensure_ascii=False),
                 }
             )
-    if reasoning_note:
-        user_content = (
-            "次の分析メモは補助情報です。必ず原文を最終的な根拠とし、誤りがあれば分析メモを採用しないでください。\n"
-            f"<分析メモ>\n{reasoning_note}\n</分析メモ>\n"
-            f"<原文>\n{text}\n</原文>"
-        )
+    if reasoning_note is not None:
+        user_content = _with_analysis_memo(text, reasoning_note, truncated=reasoning_truncated)
     else:
         user_content = text
     messages.append({"role": "user", "content": user_content})
     return messages
 
 
+def _with_analysis_memo(text: str, memo: str, *, truncated: bool = False) -> str:
+    """CoT条件の構造化出力段階の利用者の入力。原文を先に、分析メモを後に置く。"""
+
+    note = (
+        "分析メモは長さの上限で途中までしかありません。メモにない人物と疾患は、原文から判断してください。\n"
+        if truncated
+        else ""
+    )
+    return (
+        f"<原文>\n{text}\n</原文>\n"
+        "次の分析メモは補助情報です。必ず原文を最終的な根拠とし、分析メモに誤りがあれば採用しないでください。\n"
+        f"{note}"
+        f"<分析メモ>\n{memo}\n</分析メモ>"
+    )
+
+
 def build_reasoning_messages(text: str, condition: str) -> list[dict[str, str]]:
-    """CoT条件の分析段階のメッセージを作る。"""
+    """CoT条件の分析段階のメッセージを作る。system promptは共通定義に分析段階の指示を続ける。"""
 
     condition = validate_condition(condition)
     if condition not in {"zero_shot_cot", "few_shot_cot"}:
         raise ValueError(f"CoT条件ではありません: {condition}")
     system_prompt = (
-        "日本語の電子カルテ記載を、がん家族歴抽出のために段階的に分析してください。\n"
-        "既存の家族歴抽出基準に従い、(1) 疾患記載、(2) 各疾患の主体、"
+        f"{_common_definitions()}\n"
+        "上記の基準に従い、日本語の電子カルテ記載を段階的に分析してください。\n"
+        "疾患の記載がある人物ごとに、(1) 疾患記載、(2) 疾患の主体、"
         "(3) 患者本人・血縁者・非血縁者・不明の区分、(4) 続柄、"
         "(5) 対象21がんへの該当、(6) 否定・疑い、(7) 人物と疾患の対応、"
-        "(8) 家族歴として採用するか、の順に全人物を確認してください。\n"
-        "複数人物のどの人の疾患か特定できず、その違いで家族歴の採用可否が変わる場合は、推測せず判定不能と明記してください。\n"
-        "患者本人、非血縁者、不明、対象外疾患も分析対象から削除しないでください。\n"
-        "この段階では最終JSONを出さず、簡潔な分析メモだけを返してください。"
+        "(8) 家族歴として採用するか、を確認してください。\n"
+        "分析メモは、1人物・1疾患につき1行で、次の形式で書いてください。\n"
+        f"{ANALYSIS_MEMO_FORMAT}\n"
+        "疾患の記載がない人物は書かないでください。疾患の記載がまったくなければ「疾患の記載なし」とだけ書いてください。\n"
+        "複数人物のどの人の疾患か特定できず、その違いで家族歴の採用可否が変わる場合は、推測せず区分と続柄を『不明』としてください。\n"
+        "患者本人、非血縁者、不明、対象外疾患の行も省略しないでください。\n"
+        "最終JSONは出さず、分析メモだけを返してください。"
     )
     messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
     if condition == "few_shot_cot":

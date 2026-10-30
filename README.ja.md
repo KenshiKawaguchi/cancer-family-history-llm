@@ -13,11 +13,12 @@
 | `src/family_history/selection.py` | 評価用とルール生成用の患者の抽出 |
 | `src/family_history/prompts.py` | プロンプト |
 | `src/family_history/inference.py` | LLMによる抽出 |
-| `src/family_history/normalize.py` | 出力の検証と正規化 |
+| `src/family_history/normalize.py` | 出力の形式の確認と正規化（辞書v2。採点と単純ルールに使用） |
+| `src/family_history/normalize_v1.py` | Qwen3.5生成ルールを作成した時点の出力の検証と正規化（辞書v1） |
 | `src/family_history/simple_rules.py` | 単純ルール |
 | `src/family_history/rule_generation.py` | Qwen3.5によるルール生成 |
 | `src/family_history/rule_engine.py` | ルールの検証と適用 |
-| `src/family_history/evaluation.py` | 評価 |
+| `src/family_history/evaluation.py` | 評価（出力は形式だけを確認し、採用項目をそのまま採点する。正規化できない採用項目は誤って抽出されたペアとして数える） |
 | `scripts/compute_bootstrap_ci.py` | 95%信頼区間の計算 |
 | `scripts/summarize_age_sex.py` | 性別と年齢の集計 |
 
@@ -39,7 +40,7 @@ PYTHONPATH=src python -m family_history prepare-rule-generation # 疑似正解�
 PYTHONPATH=src python -m family_history generate-rules          # ルールの生成と1回の作り直し
 PYTHONPATH=src python -m family_history apply-rules             # 生成したルールの適用
 PYTHONPATH=src python -m family_history evaluate                # 人手正解に対する評価
-python scripts/compute_bootstrap_ci.py                          # 95%信頼区間
+python scripts/compute_bootstrap_ci.py                          # 95%信頼区間（乱数の種20261027。最終の出力だけを指定する）
 ```
 
 `infer`のコンテキスト長（`--n-ctx`）は、LLM-jpでは4096、ほかのモデルでは8192としました。
